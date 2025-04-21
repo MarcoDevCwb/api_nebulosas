@@ -2,9 +2,10 @@ import requests
 from PIL import Image
 from io import BytesIO
 import re
+import datetime
+import pyneb as pn
 from astroquery.simbad import Simbad
 from astroquery.vizier import Vizier
-import datetime
 
 # Catálogo de nebulosas populares
 CATALOGO_NEBULOSAS = {
@@ -64,31 +65,8 @@ def buscar_dados_simbad(nome_objeto):
         return DADOS_FIXOS[nome_query]
     return None
 
-def buscar_composicao_real_simbad(nome_objeto):
-    try:
-        nome_query = MAPEAMENTO_SIMBAD.get(nome_objeto, nome_objeto)
-        Simbad.TIMEOUT = 10
-        Simbad.add_votable_fields("coordinates")
-        result = Simbad.query_object(nome_query)
-        if not result:
-            return []
-        coord = f"{result['RA'][0]} {result['DEC'][0]}"
-        Vizier.ROW_LIMIT = 50
-        catalog = "J/A+A/605/A62"
-        tables = Vizier.query_region(coord, radius="10s", catalog=catalog)
-        if tables:
-            abund = []
-            for row in tables[0]:
-                if "logOH" in row.colnames and row["logOH"]:
-                    abund.append(f"log(O/H) = {row['logOH']}")
-            return abund
-    except Exception as e:
-        print(f"⚠️ Erro ao consultar VizieR: {e}")
-    return []
-
-# Consulta a composição química real no VizieR
 def buscar_composicao_quimica(nome_query):
-    vizier = Vizier(columns=["*"], column_filters={}, keywords=["nebula", "abundances"])
+    vizier = Vizier(columns=["*"], column_filters={})
     vizier.ROW_LIMIT = 50
     try:
         resultado = vizier.query_object(nome_query)
@@ -101,10 +79,38 @@ def buscar_composicao_quimica(nome_query):
         print(f"⚠️ Erro ao consultar composição química em VizieR: {e}")
     return None
 
+def calcular_condicoes_pyneb():
+    O3 = pn.Atom('O', 3)
+    N2 = pn.Atom('N', 2)
+    S2 = pn.Atom('S', 2)
+
+    flux_4959 = 100
+    flux_5007 = 300
+    flux_6548 = 30
+    flux_6584 = 90
+    flux_6716 = 40
+    flux_6731 = 35
+    flux_hbeta = 100
+
+    ratio_O3 = (flux_4959 + flux_5007) / flux_hbeta
+    ratio_N2 = (flux_6548 + flux_6584) / flux_hbeta
+    ratio_S2 = flux_6716 / flux_6731
+
+    temp_O3 = O3.getTemDen(ratio_O3, den=1000, wave1=5007, wave2=4959)
+    temp_N2 = N2.getTemDen(ratio_N2, den=1000, wave1=6584, wave2=6548)
+    ne_S2 = S2.getTemDen(ratio_S2, tem=temp_O3, wave1=6716, wave2=6731, den=None)
+
+    return {
+        "Temperatura [O III] (K)": temp_O3,
+        "Temperatura [N II] (K)": temp_N2,
+        "Densidade Eletrônica [S II] (cm⁻³)": ne_S2
+    }
+
 def salvar_info_em_txt(nome_nebulosa, dados_astro, imagens):
     nome_id = MAPEAMENTO_SIMBAD.get(nome_nebulosa, nome_nebulosa)
     arquivo_nome = f"{limpar_nome_arquivo(nome_nebulosa)}_info.txt"
     composicao_real = buscar_composicao_quimica(nome_id)
+    condicoes_pyneb = calcular_condicoes_pyneb()
 
     with open(arquivo_nome, "w", encoding="utf-8") as f:
         f.write(f"Nebulosa: {nome_nebulosa}\n")
@@ -120,21 +126,24 @@ def salvar_info_em_txt(nome_nebulosa, dados_astro, imagens):
         for img in imagens:
             f.write(f"- {img}\n")
 
-        f.write("\nLegenda científica sugerida para uso:\n")
+        f.write("\nLegenda científica sugerida:\n")
         if dados_astro and dados_astro['dist_ly']:
-            f.write(f"Imagem da {nome_nebulosa}, localizada a aproximadamente {dados_astro['dist_ly']:.0f} anos-luz da Terra. ")
-            f.write(f"RA: {dados_astro['ra']} | DEC: {dados_astro['dec']}. Crédito: NASA.\n")
+            f.write(f"Imagem da {nome_nebulosa}, localizada a aproximadamente {dados_astro['dist_ly']:.0f} anos-luz. RA: {dados_astro['ra']} | DEC: {dados_astro['dec']}.\n")
         else:
-            f.write(f"Imagem da {nome_nebulosa}. Dados incompletos. Crédito: NASA.\n")
+            f.write(f"Imagem da {nome_nebulosa}. Dados incompletos.\n")
 
         f.write("\nComposição química estimada:\n")
         if composicao_real:
-            f.write(f"- {composicao_real} (extraída de catálogo real via VizieR)\n")
+            f.write(f"- {composicao_real} (extraída via VizieR)\n")
         else:
             for elem, linha, cor in COMPOSICAO_GENERICA:
-                f.write(f"- {elem} (linha em {linha}) - tonalidade: {cor}\n")
+                f.write(f"- {elem} ({linha}) - tonalidade: {cor}\n")
 
-    print(f"\n📝 Informações e legenda salvas em: {arquivo_nome}")
+        f.write("\nCondições Físicas Simuladas (PyNeb):\n")
+        for descricao, valor in condicoes_pyneb.items():
+            f.write(f"- {descricao}: {valor:.0f} K\n")
+
+    print(f"\n📝 Informações salvas em: {arquivo_nome}")
 
 def search_nasa_images(query, max_results=10):
     query = query.replace("'", "").strip()
@@ -175,7 +184,7 @@ def download_and_show_image(image_url, filename):
         print(f"⚠️ Erro ao baixar/abrir imagem: {e}")
 
 def main():
-    print("🚀 Busca interativa por imagens de nebulosas (NASA + SIMBAD + VizieR + Espectros)")
+    print("🚀 Busca interativa por nebulosas (NASA + SIMBAD + VizieR + PyNeb)")
     query = escolher_nebulosa()
     dados = buscar_dados_simbad(query)
     imagens_baixadas = []
@@ -183,11 +192,11 @@ def main():
     if dados:
         print(f"\n📍 Coordenadas: RA = {dados['ra']}, DEC = {dados['dec']}")
         if dados['dist_ly']:
-            print(f"🌌 Distância estimada: {dados['dist_ly']:.1f} anos-luz ({dados['dist_pc']} pc)")
+            print(f"🌌 Distância estimada: {dados['dist_ly']:.1f} anos-luz")
         else:
             print("🌌 Distância não disponível.")
     else:
-        print("⚠️ Dados astronômicos não encontrados no SIMBAD.")
+        print("⚠️ Dados astronômicos não encontrados.")
 
     images = search_nasa_images(query, max_results=10)
     if not images:
@@ -201,7 +210,7 @@ def main():
         print(f"    🗓️  Criada em: {item['date_created']}")
         print(f"    📄 {item['description'][:120]}...")
 
-    selections = input("\nDigite os números das imagens que deseja baixar (ex: 1 3 5): ")
+    selections = input("\nDigite os números das imagens para baixar (ex: 1 3 5): ")
     numeros_escolhidos = [int(n)-1 for n in selections.split() if n.isdigit()]
 
     for idx in numeros_escolhidos:
@@ -217,19 +226,19 @@ def main():
     salvar_info_em_txt(query, dados, imagens_baixadas)
 
 def mostrar_catalogo():
-    print("\n📚 Catálogo de nebulosas disponíveis:")
+    print("\n📚 Catálogo de nebulosas:")
     for num, nome in CATALOGO_NEBULOSAS.items():
         print(f" {num}. {nome}")
-    print(" 0. Buscar por outro nome manualmente")
+    print(" 0. Buscar manualmente")
 
 def escolher_nebulosa():
     mostrar_catalogo()
-    escolha = input("\nDigite o número da nebulosa desejada ou 0 para digitar um nome manual: ")
+    escolha = input("\nDigite o número da nebulosa desejada ou 0 para buscar manualmente: ")
 
     if escolha.isdigit():
         escolha = int(escolha)
         if escolha == 0:
-            return input("Digite o nome da nebulosa que deseja buscar: ").strip()
+            return input("Digite o nome da nebulosa: ").strip()
         elif escolha in CATALOGO_NEBULOSAS:
             return CATALOGO_NEBULOSAS[escolha]
     print("❌ Opção inválida. Tente novamente.")
